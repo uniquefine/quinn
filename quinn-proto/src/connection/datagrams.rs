@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use bytes::Bytes;
 use thiserror::Error;
-use tracing::{debug, trace};
+use tracing::{debug, info, trace};
 
 use super::Connection;
 use crate::{

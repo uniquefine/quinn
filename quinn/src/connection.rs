@@ -14,7 +14,7 @@ use pin_project_lite::pin_project;
 use rustc_hash::FxHashMap;
 use thiserror::Error;
 use tokio::sync::{Notify, futures::Notified, mpsc, oneshot};
-use tracing::{Instrument, Span, debug_span};
+use tracing::{Instrument, Span, debug_span, info};
 
 use crate::{
     ConnectionEvent, Duration, Instant, VarInt,
@@ -447,8 +447,9 @@ impl Connection {
         }
     }
 
+    /// Create an I/O poller that will wake up when a datagram is unblocked.
     pub fn create_io_poller(&self) -> Pin<Box<dyn UdpPoller>> {
-        self.0.shared.datagrams_unblocked.notified()
+        Box::pin(DatagramsUnblockedPoller::new(self.0.clone()))
     }
 
     /// Transmit `data` as an unreliable, unordered application datagram
@@ -780,7 +781,7 @@ pin_project! {
     struct DatagramsUnblockedPoller {
         conn: ConnectionRef,
         #[pin]
-        current_notify: Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + 'static + Sync>>,
+        current_notify: Option<Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + 'static + Sync>>>,
     }
 }
 
@@ -788,11 +789,47 @@ impl DatagramsUnblockedPoller {
     fn new(conn: ConnectionRef) -> Self {
         Self {
             conn: conn.clone(),
-            current_notify: Box::pin(async move {
-                conn.shared.datagrams_unblocked.notified().await;
-                Ok(())
-            }),
+            current_notify: None,
         }
+    }
+
+    fn poll_writable_inner(self: Pin<&mut Self>, cx: &mut Context) -> Poll<std::io::Result<()>> {
+        let mut this = self.project();
+
+        let state = this
+            .conn
+            .state
+            .lock("DatagramsUnlockedPoller::poll_writable_inner");
+        if !state.inner.datagrams_send_blocked() {
+            info!("DatagramsUnlockedPoller::poll_writable_inner: datagrams not blocked");
+            return Poll::Ready(Ok(()));
+        }
+
+        // If we don't have a current notification future, create one
+        if this.current_notify.is_none() {
+            let conn_clone = this.conn.clone();
+            let new_future = Box::pin(async move {
+                conn_clone.shared.datagrams_unblocked.notified().await;
+                Ok(())
+            });
+            this.current_notify.set(Some(new_future));
+        }
+
+        // Poll the current future (we know it exists now)
+        if let Some(future) = this.current_notify.as_mut().as_pin_mut() {
+            match future.poll(cx) {
+                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Err(e)) => {
+                    return Poll::Ready(Err(e));
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+
+        // The future returned Ready, so clear it (lazy re-creation on next call)
+        this.current_notify.set(None);
+
+        Poll::Ready(Ok(()))
     }
 }
 
@@ -804,15 +841,8 @@ impl std::fmt::Debug for DatagramsUnblockedPoller {
 
 impl UdpPoller for DatagramsUnblockedPoller {
     fn poll_writable(self: Pin<&mut Self>, cx: &mut Context) -> Poll<std::io::Result<()>> {
-        let mut this = self.project();
-        ready!(this.current_notify.as_mut().poll(cx))?;
-        let conn_clone = this.conn.clone();
-        let new_notify = Box::pin(async move {
-            conn_clone.shared.datagrams_unblocked.notified().await;
-            std::io::Result::Ok(())
-        });
-        this.current_notify.set(new_notify);
-        Poll::Ready(Ok(()))
+        let res = self.poll_writable_inner(cx);
+        res
     }
 }
 
@@ -857,6 +887,43 @@ pin_project! {
         data: Option<Bytes>,
         #[pin]
         notify: Notified<'a>,
+    }
+}
+
+#[derive(Debug)]
+pub enum TrySendDatagramError {
+    ConnectionLost(ConnectionError),
+    UnsupportedByPeer,
+    Disabled,
+    TooLarge,
+    Blocked(Bytes),
+}
+
+impl Connection {
+    pub fn try_send_datagram(&self, data: Bytes) -> Result<(), TrySendDatagramError> {
+        let mut state = self.0.state.lock("try_send_datagram");
+        if let Some(ref e) = state.error {
+            return Err(TrySendDatagramError::ConnectionLost(e.clone()));
+        }
+        state
+            .inner
+            .datagrams()
+            .send(data, false)
+            .map_err(|e| match e {
+                proto::SendDatagramError::UnsupportedByPeer => {
+                    TrySendDatagramError::UnsupportedByPeer
+                }
+                proto::SendDatagramError::Disabled => TrySendDatagramError::Disabled,
+                proto::SendDatagramError::TooLarge => TrySendDatagramError::TooLarge,
+                proto::SendDatagramError::Blocked(data) => {
+                    info!("DatagramsUnlockedPoller::poll_writable_inner: datagrams blocked");
+                    TrySendDatagramError::Blocked(data)
+                }
+            })?;
+        info!("try_send_datagram success");
+        // XXX(uniquefine): I'm not 100 sure if this is needed or what the effect of it is.
+        state.wake();
+        Ok(())
     }
 }
 

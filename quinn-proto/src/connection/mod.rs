@@ -3051,6 +3051,10 @@ impl Connection {
             .push_back(EndpointEventInner::NeedIdentifiers(now, n));
     }
 
+    pub fn datagrams_send_blocked(&self) -> bool {
+        self.datagrams.send_blocked
+    }
+
     fn populate_packet(
         &mut self,
         now: Instant,
