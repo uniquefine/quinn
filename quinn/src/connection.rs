@@ -447,6 +447,10 @@ impl Connection {
         }
     }
 
+    pub fn create_io_poller(&self) -> Pin<Box<dyn UdpPoller>> {
+        self.0.shared.datagrams_unblocked.notified()
+    }
+
     /// Transmit `data` as an unreliable, unordered application datagram
     ///
     /// Unlike [`send_datagram()`], this method will wait for buffer space during congestion
@@ -769,6 +773,46 @@ fn poll_accept<'a>(
             // Spurious wakeup, get a new future
             Poll::Ready(()) => notify.set(conn.shared.stream_incoming[dir as usize].notified()),
         }
+    }
+}
+
+pin_project! {
+    struct DatagramsUnblockedPoller {
+        conn: ConnectionRef,
+        #[pin]
+        current_notify: Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + 'static + Sync>>,
+    }
+}
+
+impl DatagramsUnblockedPoller {
+    fn new(conn: ConnectionRef) -> Self {
+        Self {
+            conn: conn.clone(),
+            current_notify: Box::pin(async move {
+                conn.shared.datagrams_unblocked.notified().await;
+                Ok(())
+            }),
+        }
+    }
+}
+
+impl std::fmt::Debug for DatagramsUnblockedPoller {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "DatagramsUnblockedPoller")
+    }
+}
+
+impl UdpPoller for DatagramsUnblockedPoller {
+    fn poll_writable(self: Pin<&mut Self>, cx: &mut Context) -> Poll<std::io::Result<()>> {
+        let mut this = self.project();
+        ready!(this.current_notify.as_mut().poll(cx))?;
+        let conn_clone = this.conn.clone();
+        let new_notify = Box::pin(async move {
+            conn_clone.shared.datagrams_unblocked.notified().await;
+            std::io::Result::Ok(())
+        });
+        this.current_notify.set(new_notify);
+        Poll::Ready(Ok(()))
     }
 }
 
