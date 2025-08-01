@@ -924,12 +924,8 @@ impl Connection {
                 }
                 proto::SendDatagramError::Disabled => TrySendDatagramError::Disabled,
                 proto::SendDatagramError::TooLarge => TrySendDatagramError::TooLarge,
-                proto::SendDatagramError::Blocked(data) => {
-                    info!("DatagramsUnlockedPoller::poll_writable_inner: datagrams blocked");
-                    TrySendDatagramError::Blocked(data)
-                }
+                proto::SendDatagramError::Blocked(data) => TrySendDatagramError::Blocked(data),
             })?;
-        // XXX(uniquefine): I'm not 100 sure if this is needed or what the effect of it is.
         state.wake();
         Ok(())
     }
