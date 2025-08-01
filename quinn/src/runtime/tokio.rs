@@ -23,8 +23,11 @@ impl Runtime for TokioRuntime {
         Box::pin(sleep_until(t.into()))
     }
 
-    fn spawn(&self, future: Pin<Box<dyn Future<Output = ()> + Send>>) {
-        tokio::spawn(future);
+    fn spawn(&self, name: &str, future: Pin<Box<dyn Future<Output = ()> + Send>>) {
+        tokio::task::Builder::new()
+            .name(name)
+            .spawn(future)
+            .unwrap();
     }
 
     fn wrap_udp_socket(&self, sock: std::net::UdpSocket) -> io::Result<Arc<dyn AsyncUdpSocket>> {

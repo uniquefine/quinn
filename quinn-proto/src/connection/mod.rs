@@ -3261,8 +3261,13 @@ impl Connection {
                 false => break,
             }
         }
+        tracing::debug!(
+            "populate_packet: send_blocked == {}",
+            self.datagrams.send_blocked
+        );
         if self.datagrams.send_blocked && sent_datagrams {
             self.events.push_back(Event::DatagramsUnblocked);
+            tracing::debug!("populate_packet: send_blocked set to false");
             self.datagrams.send_blocked = false;
         }
 

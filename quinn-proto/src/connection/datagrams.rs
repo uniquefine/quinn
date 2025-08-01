@@ -26,6 +26,7 @@ impl Datagrams<'_> {
     ///
     /// Returns `Err` iff a `len`-byte datagram cannot currently be sent.
     pub fn send(&mut self, data: Bytes, drop: bool) -> Result<(), SendDatagramError> {
+        tracing::debug!("send");
         if self.conn.config.datagram_receive_buffer_size.is_none() {
             return Err(SendDatagramError::Disabled);
         }
@@ -49,6 +50,7 @@ impl Datagrams<'_> {
         } else if self.conn.datagrams.outgoing_total + data.len()
             > self.conn.config.datagram_send_buffer_size
         {
+            tracing::debug!("send: send_blocked = true");
             self.conn.datagrams.send_blocked = true;
             return Err(SendDatagramError::Blocked(data));
         }

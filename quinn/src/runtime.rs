@@ -17,7 +17,7 @@ pub trait Runtime: Send + Sync + Debug + 'static {
     /// Construct a timer that will expire at `i`
     fn new_timer(&self, i: Instant) -> Pin<Box<dyn AsyncTimer>>;
     /// Drive `future` to completion in the background
-    fn spawn(&self, future: Pin<Box<dyn Future<Output = ()> + Send>>);
+    fn spawn(&self, name: &str, future: Pin<Box<dyn Future<Output = ()> + Send>>);
     /// Convert `t` into the socket type used by this runtime
     #[cfg(not(wasm_browser))]
     fn wrap_udp_socket(&self, t: std::net::UdpSocket) -> io::Result<Arc<dyn AsyncUdpSocket>>;

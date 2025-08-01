@@ -60,14 +60,17 @@ impl Connecting {
         );
 
         let driver = ConnectionDriver(conn.clone());
-        runtime.spawn(Box::pin(
-            async {
-                if let Err(e) = driver.await {
-                    tracing::error!("I/O error: {e}");
+        runtime.spawn(
+            "quinn-connection-driver",
+            Box::pin(
+                async {
+                    if let Err(e) = driver.await {
+                        tracing::error!("I/O error: {e}");
+                    }
                 }
-            }
-            .instrument(Span::current()),
-        ));
+                .instrument(Span::current()),
+            ),
+        );
 
         Self {
             conn: Some(conn),
@@ -796,13 +799,18 @@ impl DatagramsUnblockedPoller {
     fn poll_writable_inner(self: Pin<&mut Self>, cx: &mut Context) -> Poll<std::io::Result<()>> {
         let mut this = self.project();
 
-        let state = this
-            .conn
-            .state
-            .lock("DatagramsUnlockedPoller::poll_writable_inner");
-        if !state.inner.datagrams_send_blocked() {
-            info!("DatagramsUnlockedPoller::poll_writable_inner: datagrams not blocked");
-            return Poll::Ready(Ok(()));
+        {
+            let state = this
+                .conn
+                .state
+                .lock("DatagramsUnlockedPoller::poll_writable_inner");
+            tracing::debug!(
+                "poll_writable_inner: datagrams_send_blocked == {}",
+                state.inner.datagrams_send_blocked()
+            );
+            if !state.inner.datagrams_send_blocked() {
+                return Poll::Ready(Ok(()));
+            }
         }
 
         // If we don't have a current notification future, create one
@@ -901,6 +909,7 @@ pub enum TrySendDatagramError {
 
 impl Connection {
     pub fn try_send_datagram(&self, data: Bytes) -> Result<(), TrySendDatagramError> {
+        tracing::debug!("try_send_datagram");
         let mut state = self.0.state.lock("try_send_datagram");
         if let Some(ref e) = state.error {
             return Err(TrySendDatagramError::ConnectionLost(e.clone()));
@@ -920,7 +929,6 @@ impl Connection {
                     TrySendDatagramError::Blocked(data)
                 }
             })?;
-        info!("try_send_datagram success");
         // XXX(uniquefine): I'm not 100 sure if this is needed or what the effect of it is.
         state.wake();
         Ok(())
@@ -1098,6 +1106,7 @@ impl State {
             .min(MAX_TRANSMIT_SEGMENTS);
 
         loop {
+            tracing::debug!("drive_transmit: loop");
             // Retry the last transmit, or get a new one.
             let t = match self.buffered_transmit.take() {
                 Some(t) => t,
@@ -1121,6 +1130,7 @@ impl State {
             };
 
             if self.io_poller.as_mut().poll_writable(cx)?.is_pending() {
+                tracing::debug!("drive_transmit: poll_writable pending");
                 // Retry after a future wakeup
                 self.buffered_transmit = Some(t);
                 return Ok(false);
@@ -1132,7 +1142,10 @@ impl State {
                 .try_send(&udp_transmit(&t, &self.send_buffer[..len]))
             {
                 Ok(()) => false,
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => true,
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    tracing::debug!("drive_transmit: would block");
+                    true
+                }
                 Err(e) => return Err(e),
             };
             if retry {
@@ -1141,6 +1154,7 @@ impl State {
                 // registers us for a wakeup, or the send succeeds if this really was just a
                 // transient failure.
                 self.buffered_transmit = Some(t);
+                tracing::debug!("drive_transmit: retry");
                 continue;
             }
 
@@ -1151,6 +1165,7 @@ impl State {
                 // See https://github.com/quinn-rs/quinn/issues/1126
                 return Ok(true);
             }
+            tracing::debug!("drive_transmit: send next packet");
         }
 
         Ok(false)

@@ -147,14 +147,17 @@ impl Endpoint {
             runtime.clone(),
         );
         let driver = EndpointDriver(rc.clone());
-        runtime.spawn(Box::pin(
-            async {
-                if let Err(e) = driver.await {
-                    tracing::error!("I/O error: {}", e);
+        runtime.spawn(
+            "quinn-endpoint-driver",
+            Box::pin(
+                async {
+                    if let Err(e) = driver.await {
+                        tracing::error!("I/O error: {}", e);
+                    }
                 }
-            }
-            .instrument(Span::current()),
-        ));
+                .instrument(Span::current()),
+            ),
+        );
         Ok(Self {
             inner: rc,
             default_client_config: None,
